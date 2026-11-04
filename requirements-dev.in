@@ -1,0 +1,8 @@
+-r requirements.in
+moto[dynamodb,s3]>=5,<6
+pytest>=8,<10
+pytest-cov>=6,<8
+ruff>=0.9,<1
+setuptools>=75,<82
+wheel>=0.45,<1
+uv==0.13.7

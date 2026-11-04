@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=75,<82"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "serverless-data-api"
+version = "1.0.0"
+description = "Bounded asynchronous CSV/JSON ingestion on AWS"
+requires-python = ">=3.12"
+dependencies = ["boto3>=1.35,<2", "requests>=2.32,<3"]
+
+[project.scripts]
+data-api = "data_api.client:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.coverage.run]
+source = ["data_api"]
+omit = ["*/client.py"]

@@ -1,0 +1,33 @@
+name: Checks
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements-dev.lock
+      - run: python -m pip install --require-hashes -r requirements-dev.lock
+      - run: python -m pip install --no-deps --no-build-isolation -e .
+      - run: ruff check .
+      - run: ruff format --check .
+      - run: python scripts/check_repository.py
+      - run: pytest --cov=data_api --cov-report=term-missing --cov-fail-under=85
+      - run: python scripts/build_lambda.py
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.14.9'
+      - run: terraform -chdir=infra fmt -check
+      - run: terraform -chdir=infra init -backend=false -input=false -lockfile=readonly
+      - run: terraform -chdir=infra validate
+      - run: terraform -chdir=infra test -no-color

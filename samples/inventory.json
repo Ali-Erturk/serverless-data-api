@@ -1,0 +1,5 @@
+[
+  {"sku": "A100", "name": "USB cable", "quantity": 12},
+  {"sku": "A200", "name": "Sensor board", "quantity": 4},
+  {"sku": "A300", "name": "Power adapter", "quantity": 7}
+]

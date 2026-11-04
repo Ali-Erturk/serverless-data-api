@@ -1,0 +1,7 @@
+# Copy to terraform.tfvars and configure your account and region before planning deployment.
+aws_account_id = "123456789012" # Replace with the approved account, never inferred.
+aws_region     = "us-east-1"
+name_prefix    = "ali-data-api"
+environment    = "demo"
+# alarm_actions = ["arn:aws:sns:us-east-1:123456789012:existing-alert-topic"]
+# allow_destroy_data = true # Only for explicit project teardown.
