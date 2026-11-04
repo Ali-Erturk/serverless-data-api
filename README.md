@@ -2,46 +2,35 @@
 
 [![Checks](https://github.com/Ali-Erturk/serverless-data-api/actions/workflows/checks.yml/badge.svg)](https://github.com/Ali-Erturk/serverless-data-api/actions/workflows/checks.yml)
 
-A Python backend for asynchronous CSV and JSON dataset ingestion on AWS. Upload a dataset,
-track its processing status, and download normalized JSON with row counts and column metadata.
+Upload a CSV or JSON file, get a job ID back, and download normalized JSON when processing finishes.
+The API handles small datasets and runs on AWS Lambda, with S3 for files and DynamoDB for job status.
 
-**Stack:** Python · AWS Lambda · API Gateway · S3 · DynamoDB · SQS · CloudWatch · Terraform · GitHub Actions
+## How it works
 
-## Features
-
-- Three IAM-authorized API routes for upload creation, dataset status, and result downloads.
-- Direct-to-S3 uploads using short-lived forms with server-generated keys and exact size constraints.
-- CSV and flat JSON validation with explicit byte, row, column, and processing limits.
-- Asynchronous processing with SHA-256 verification and immutable input-version selection.
-- Conditional DynamoDB leases and attempt tokens to handle duplicate events and interrupted workers.
-- Private encrypted storage, scoped IAM roles, failure capture, structured logs, and cleanup policies.
-- A SigV4 Python client and an offline example using in-memory AWS service models.
-
-## Architecture
+1. The client asks the API for an upload form.
+2. The file goes straight to a private S3 bucket.
+3. S3 triggers a worker that checks the file and converts it to JSON.
+4. The client polls the job status, then downloads the result from a separate bucket.
 
 ```mermaid
 flowchart LR
-    C[Python client] -->|SigV4| G[API Gateway / IAM]
-    G --> A[API Lambda]
+    C[Python client] -->|Signed requests| A[API Gateway + Lambda]
     A <--> D[(DynamoDB)]
-    A -->|upload form| C
-    C -->|direct upload| U[(Private versioned S3 uploads)]
-    U -->|object-created event| W[Processing Lambda]
+    C -->|Upload form| U[(S3 uploads)]
+    U --> W[Worker Lambda]
     W <--> D
-    W --> R[(Private S3 results)]
-    A -->|download URL| C
-    C --> R
-    W -->|exhausted retries| Q[SQS failure destination]
-    A --> L[CloudWatch logs / alarms]
-    W --> L
+    W --> R[(S3 results)]
+    C -->|Download URL from API| R
 ```
 
-File bytes travel directly between the client and S3. The API handles metadata and temporary access,
-while the worker validates and normalizes each dataset. Separate buckets prevent processing loops.
+The worker checks the file's size and SHA-256 before processing it. S3 can send the same event more
+than once, so DynamoDB updates track which worker owns the job. Upload versioning and separate result
+keys keep a repeated upload or an old worker from replacing a completed result.
 
-## Quick start
+## Run it locally
 
-Requirements: Python 3.12. Local examples and tests run without an AWS account or Docker.
+You'll need Python 3.12. The local example uses Moto to simulate AWS services, so you don't need an
+AWS account or Docker to try it.
 
 ```powershell
 git clone https://github.com/Ali-Erturk/serverless-data-api.git
@@ -51,104 +40,52 @@ python -m venv .venv
 python -m pip install --require-hashes -r requirements-dev.lock
 python -m pip install --no-deps --no-build-isolation -e .
 python scripts/local_demo.py
-pytest --cov=data_api --cov-report=term-missing --cov-fail-under=85
 ```
 
-On Linux/macOS, activate the environment with `source .venv/bin/activate`.
-The local example processes both sample formats, prints their normalized results, rejects malformed
-CSV, and replays events to demonstrate idempotent completion. Moto provides the in-memory S3 and
-DynamoDB models.
+On Linux/macOS, use `source .venv/bin/activate` to activate the environment.
 
-Example normalized result:
+The example runs both sample files, prints the results, and shows what happens with a malformed CSV
+and repeated events. CSV values stay as strings; JSON values keep their original scalar types.
 
-```json
-{
-  "schema_version": 1,
-  "summary": {"row_count": 1, "columns": ["sku", "quantity"], "input_bytes": 21},
-  "records": [{"sku": "A100", "quantity": "12"}]
-}
-```
+## Endpoints
 
-CSV values remain strings. JSON strings, finite numbers, booleans, and null retain their types.
+All three routes use IAM authentication. The Python client signs requests using your AWS credentials.
 
-## API
-
-| Route | Behavior | Success |
-| --- | --- | --- |
-| `POST /uploads` | Create a dataset ID and constrained S3 upload form | `201` |
-| `GET /datasets/{id}` | Read state, timestamps, summary, or validation errors | `200` |
-| `GET /datasets/{id}/download` | Issue a short-lived URL for a completed result | `200` |
-
-Create-upload body:
-
-```json
-{"format":"csv","size_bytes":21,"sha256":"<64 lowercase hex digits of the file's SHA-256>"}
-```
-
-The client calculates the actual byte length and digest. Upload forms and download URLs expire after
-300 seconds, or earlier when their signing credentials expire. Application errors use fixed codes
-and a request ID; invalid requests return `400`, unknown datasets `404`, and unavailable results `409`.
-
-Every route uses API Gateway `AWS_IAM`. The client signs requests for service `execute-api` using the
-AWS credential chain. Terraform creates a scoped caller policy; callers need no direct S3 or DynamoDB
-access. Presigned forms and URLs grant temporary access and should be treated as secrets.
-
-## Data contract
-
-| Constraint | Limit |
+| Request | What it does |
 | --- | --- |
-| File size | 1 byte–1 MiB |
-| Rows | 1–10,000 |
-| Columns | 1–100, consistent across records |
-| Column names | Unique, nonblank, up to 128 UTF-8 bytes |
-| String values | Up to 4,096 UTF-8 bytes |
-| Results | Up to 8 MiB |
-| Worker execution | 30-second Lambda timeout; 10-second cooperative validation budget |
+| `POST /uploads` | Returns a dataset ID and a five-minute S3 upload form |
+| `GET /datasets/{id}` | Returns the job's status, summary, or validation error |
+| `GET /datasets/{id}/download` | Returns a five-minute download URL once the result is ready |
 
-CSV requires a header and matching row widths; quoted fields, CRLF, and an optional UTF-8 BOM are
-supported. JSON requires a nonempty array of flat objects. Duplicate keys, nested values, NUL
-characters, nonfinite numbers, empty inputs, and malformed records are rejected.
+Jobs move through `awaiting_upload`, `processing`, `completed`, and `failed`. Results include the
+records, row count, column names, and input size. The client calculates the upload size and checksum.
 
-## Processing and recovery
+## Limits and failure handling
 
-Datasets move through `awaiting_upload`, `processing`, `completed`, and `failed`. The first successfully
-claimed S3 event version becomes the immutable input for that job. A 60-second lease permits recovery
-after interrupted execution, and attempt tokens fence completion updates. Each attempt writes a
-distinct result key so stale workers cannot overwrite a published result.
+Files must be UTF-8 CSV with a header, or JSON arrays of flat objects with matching columns. The
+limits are 1 MiB per upload, 10,000 rows, 100 columns, and 4,096 UTF-8 bytes per string value.
+Empty files, mismatched CSV rows, nested JSON, and duplicate headers or keys are rejected.
 
-Validation errors are terminal. Transient failures are raised for Lambda asynchronous retries;
-exhausted invocations are retained in SQS. Jobs still awaiting upload or processing after 30 minutes
-report `JOB_EXPIRED`. Results and metadata have seven-day application retention. S3 lifecycle and
-DynamoDB TTL provide eventual cleanup.
+Temporary processing failures are retried; exhausted invocations go to an SQS failure queue. Jobs
+that don't finish within 30 minutes report an expiry error. Results and metadata expire after seven
+days. The API is single tenant, so authorized callers share the same dataset namespace.
 
-The API is single tenant: authorized callers share the dataset namespace. POST upload creation is
-not idempotent, forms can be reused until expiry, and automatic re-drive is outside the current scope.
-See [design decisions](docs/design-decisions.md) for ownership, permissions, and recovery details.
-
-## Testing and development
-
-The 71-test suite covers the API contract, parsing boundaries, malformed input, result generation,
-checksum failures, duplicate events, upload replay, transient storage failures, expired leases,
-stale completion, Lambda entry points, and client signing. Application coverage is 97.78%; client
-transport behavior is tested separately from that percentage.
-
-Unit tests use Moto and injected faults. Terraform tests use a mocked provider to check route
-authorization, bucket access controls, input versioning, lease/runtime compatibility, retries, and
-safe deletion defaults. GitHub Actions runs lint, formatting, tests, Linux package assembly, and
-Terraform validation. See [development](docs/development.md) for commands and dependency locking.
-
-## AWS deployment
-
-The [deployment guide](docs/deployment.md) covers account configuration, Terraform plan/apply,
-caller permissions, signed client requests, service integration checks, observability, costs,
-and teardown.
+## Tests
 
 ```powershell
-python scripts/build_lambda.py
-terraform -chdir=infra init -input=false -lockfile=readonly
-# Configure infra/terraform.tfvars for your AWS account, then review a Terraform plan.
+pytest --cov=data_api --cov-report=term-missing --cov-fail-under=85
+ruff check .
 ```
 
-API Gateway, Lambda, S3, DynamoDB, SQS, CloudWatch, and data transfer can incur charges. Review the
-resource plan and regional pricing before applying it. Log retention, alarms, lifecycle rules, and
-an explicit teardown procedure are included.
+There are 71 tests covering file validation, API responses, result contents, duplicate events,
+worker retries, expired leases, and request signing. AWS calls use Moto and injected failures.
+GitHub Actions also builds the Linux Lambda package and checks the Terraform configuration.
+
+## Deploying to AWS
+
+Terraform sets up the API, Lambda functions, private buckets, DynamoDB table, failure queue, logs,
+and alarms. The [deployment guide](docs/deployment.md) walks through configuration, using the signed
+client, checking the services, and tearing everything down. AWS usage can incur charges, including
+storage, requests, logs, and alarms.
+
+More detail: [design decisions](docs/design-decisions.md) · [development setup](docs/development.md).
